@@ -133,6 +133,9 @@ type Config struct {
 	// SubnetSize specifies the subnet size of the networks created from
 	// the default subnet pool
 	SubnetSize int
+
+	// ConnectionDialOptions is a slice of Dial Options set to the connection broker
+	ConnectionDialOptions []grpc.DialOption
 }
 
 // Manager is the cluster manager for Swarm.
@@ -235,6 +238,7 @@ func New(config *Config) (*Manager, error) {
 		TLSCredentials:  config.SecurityConfig.ClientTLSCreds,
 		KeyRotator:      dekRotator,
 		FIPS:            config.FIPS,
+		TransportDefaultDialOptions: config.ConnectionDialOptions,
 	}
 	raftNode := raft.NewNode(newNodeOpts)
 
@@ -752,8 +756,7 @@ func (m *Manager) updateKEK(ctx context.Context, cluster *api.Cluster) error {
 		go func() {
 			insecureCreds := credentials.NewTLS(&tls.Config{InsecureSkipVerify: true})
 
-			conn, err := grpc.Dial(
-				m.config.ControlAPI,
+			opts := []grpc.DialOption{
 				grpc.WithUnaryInterceptor(grpc_prometheus.UnaryClientInterceptor),
 				grpc.WithStreamInterceptor(grpc_prometheus.StreamClientInterceptor),
 				grpc.WithTransportCredentials(insecureCreds),
@@ -761,16 +764,18 @@ func (m *Manager) updateKEK(ctx context.Context, cluster *api.Cluster) error {
 					func(addr string, timeout time.Duration) (net.Conn, error) {
 						return xnet.DialTimeoutLocal(addr, timeout)
 					}),
-			)
+			}
+
+			connBroker := connectionbroker.New(remotes.NewRemotes(), m.config.ConnectionDialOptions...)
+			err = connBroker.SetLocalConn(m.config.ControlAPI, opts...)
 			if err != nil {
 				logger.WithError(err).Error("failed to connect to local manager socket after locking the cluster")
 				return
 			}
 
+			conn := connBroker.GetLocalConn()
 			defer conn.Close()
 
-			connBroker := connectionbroker.New(remotes.NewRemotes())
-			connBroker.SetLocalConn(conn)
 			if err := ca.RenewTLSConfigNow(ctx, securityConfig, connBroker, m.config.RootCAPaths); err != nil {
 				logger.WithError(err).Error("failed to download new TLS certificate after locking the cluster")
 			}
